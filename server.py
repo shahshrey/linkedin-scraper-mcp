@@ -94,17 +94,43 @@ class LinkedInLoginServer:
 
     async def ensure_browser(self):
         """Ensure browser is initialized."""
-        if not self.playwright:
+        # Close any existing sessions
+        await self.cleanup()
+        
+        try:
+            # Use the same configuration as our working direct test
+            logger.info("Starting Playwright")
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(headless=True)
-            self.context = await self.browser.new_context()
+            
+            logger.info("Launching browser")
+            self.browser = await self.playwright.chromium.launch(
+                headless=False,
+                slow_mo=100
+            )
+            
+            logger.info("Creating browser context")
+            self.context = await self.browser.new_context(
+                viewport={'width': 1280, 'height': 720}
+            )
+            
+            logger.info("Creating new page")
             self.page = await self.context.new_page()
+            
+            logger.info("Initializing LoginPage")
             self.login_page = LoginPage(self.page)
+            
+            logger.info("Browser session initialized successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize browser: {str(e)}")
+            await self.cleanup()
+            raise Exception(f"Browser initialization failed: {str(e)}")
 
-    async def handle_call_tool(self, request: Any) -> Dict:
+    async def handle_call_tool(self, params: Any) -> Dict:
         """Handle tool execution requests."""
-        tool_name = request.params.get("name")
-        arguments = request.params.get("arguments", {})
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
 
         if tool_name == "login":
             return await self.handle_login(arguments)
@@ -185,6 +211,7 @@ class LinkedInLoginServer:
             logger.debug(f"Received message: {message}")
             request = json.loads(message)
             method = request.get('method')
+            params = request.get('params', {})
             logger.debug(f"Processing method: {method}")
 
             if method not in self.handlers:
@@ -200,9 +227,9 @@ class LinkedInLoginServer:
                 handler = self.handlers[method]
                 # Check if handler is async or sync
                 if asyncio.iscoroutinefunction(handler):
-                    result = await handler(request.get('params', {}))
+                    result = await handler(params)
                 else:
-                    result = handler(request.get('params', {}))
+                    result = handler(params)
 
                 if result is None:
                     return
@@ -212,6 +239,8 @@ class LinkedInLoginServer:
                     'id': request.get('id'),
                     'result': result
                 }
+                logger.debug(f"Request: {request}")
+                logger.debug(f"Result: {result}")
 
             logger.debug(f"Sending response: {response}")
             print(json.dumps(response), flush=True)
@@ -220,7 +249,7 @@ class LinkedInLoginServer:
             logger.error(f"Error handling message: {str(e)}", exc_info=True)
             error_response = {
                 'jsonrpc': '2.0',
-                'id': request.get('id'),
+                'id': request.get('id') if 'request' in locals() else None,
                 'error': {
                     'code': -32603,
                     'message': str(e)

@@ -1,5 +1,4 @@
 import logging
-import os
 from playwright.async_api import Page, TimeoutError
 from typing import Optional
 
@@ -12,44 +11,42 @@ class LoginPage:
     
     def __init__(self, page: Page):
         self.page = page
-        self.email_input = page.get_by_label("Email or Phone")
-        self.password_input = page.get_by_label("Password")
-        self.login_button = page.locator('button[data-litms-control-urn="login-submit"]')
+        # Use simpler, more reliable selectors
+        self.email_input = page.locator('input[id="username"]')
+        self.password_input = page.locator('input[id="password"]')
+        self.login_button = page.locator('button[type="submit"]')
 
     async def login(self, email: Optional[str] = None, password: Optional[str] = None) -> bool:
         """
         Handle LinkedIn login with proper error handling and logging.
-        
-        Args:
-            email: Optional email override (defaults to env var)
-            password: Optional password override (defaults to env var)
-            
-        Returns:
-            bool: True if login successful, False otherwise
-            
-        Raises:
-            ValueError: If credentials not provided
-            Exception: For other login failures
         """
         if not email or not password:
             raise ValueError("Email and password must be provided")
 
         try:
-            logger.info("Navigating to LinkedIn login page")
-            await self.page.goto("https://www.linkedin.com/login")
+            logger.info("Attempting LinkedIn login")
+            await self.page.goto("https://www.linkedin.com/login", timeout=60000)
             
-            logger.debug("Filling login credentials")
             await self.email_input.fill(email)
             await self.password_input.fill(password)
-            
-            logger.debug("Clicking login button")
             await self.login_button.click()
 
-            logger.info("Waiting for redirect to feed page")
-            await self.page.wait_for_url("https://www.linkedin.com/feed/", timeout=15000)
+            # Wait for initial navigation after clicking login
+            await self.page.wait_for_load_state("domcontentloaded", timeout=30000)
             
-            logger.info("Login successful")
-            return True
+            current_url = self.page.url
+
+            # Check URL for success/failure
+            if "feed" in current_url:
+                logger.info("Successfully logged in")
+                return True
+            elif "checkpoint" in current_url or "security-verification" in current_url:
+                logger.warning("Security verification required")
+                return False
+            else:
+                html = await self.page.content()
+                logger.error(f"Unexpected page content: {html[:500]}...")
+                raise Exception(f"Unexpected redirect URL: {current_url}")
             
         except TimeoutError:
             logger.error("Login timeout - failed to redirect to feed page")

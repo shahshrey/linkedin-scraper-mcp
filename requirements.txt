@@ -2,3 +2,4 @@ playwright
 pytest
 pytest-asyncio
 pytest-playwright
+mcp
