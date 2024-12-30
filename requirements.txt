@@ -3,3 +3,5 @@ pytest
 pytest-asyncio
 pytest-playwright
 mcp
+beautifulsoup4 
+lxml
