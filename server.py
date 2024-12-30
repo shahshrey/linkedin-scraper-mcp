@@ -7,6 +7,7 @@ from typing import Dict, Any
 from playwright.async_api import async_playwright
 from login_page import LoginPage
 from mcp.types import ErrorData as McpError, METHOD_NOT_FOUND
+from profile_page import ProfilePage
 
 # Constants
 PROTOCOL_VERSION = "0.1.0"
@@ -37,6 +38,7 @@ class LinkedInLoginServer:
         self.context = None
         self.page = None
         self.login_page = None
+        self.profile_page = None
 
     def _handle_initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
         client_protocol_version = params.get('protocolVersion', PROTOCOL_VERSION)
@@ -88,6 +90,34 @@ class LinkedInLoginServer:
                         "type": "object",
                         "properties": {}
                     }
+                },
+                {
+                    "name": "scrape_posts",
+                    "description": "Scrape LinkedIn posts from specified profiles (includes login if needed)",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "profile_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of LinkedIn profile IDs to scrape"
+                            },
+                            "max_posts": {
+                                "type": "integer",
+                                "description": "Maximum number of posts to scrape per profile",
+                                "default": 5
+                            },
+                            "email": {
+                                "type": "string",
+                                "description": "LinkedIn email/username (required if not already logged in)"
+                            },
+                            "password": {
+                                "type": "string",
+                                "description": "LinkedIn password (required if not already logged in)"
+                            }
+                        },
+                        "required": ["profile_ids"]
+                    }
                 }
             ]
         }
@@ -119,6 +149,8 @@ class LinkedInLoginServer:
             logger.info("Initializing LoginPage")
             self.login_page = LoginPage(self.page)
             
+            self.profile_page = ProfilePage(self.page)
+            
             logger.info("Browser session initialized successfully")
             return True
             
@@ -136,6 +168,8 @@ class LinkedInLoginServer:
             return await self._handle_login(arguments)
         elif tool_name == "check_login_status":
             return await self._handle_check_login_status()
+        elif tool_name == "scrape_posts":
+            return await self._handle_scrape_posts(arguments)
         else:
             raise McpError(
                 METHOD_NOT_FOUND,
@@ -192,6 +226,55 @@ class LinkedInLoginServer:
                     "type": "text",
                     "text": json.dumps({
                         "error": f"Failed to check login status: {str(e)}"
+                    })
+                }],
+                "isError": True
+            }
+
+    async def _handle_scrape_posts(self, arguments: Dict) -> Dict:
+        """Handle LinkedIn post scraping requests."""
+        try:
+            await self._ensure_browser()
+            
+            # First check if we're already logged in
+            is_logged_in = await self.login_page.is_logged_in()
+            
+            if not is_logged_in:
+                # Get credentials from arguments
+                email = arguments.get("email")
+                password = arguments.get("password")
+                
+                if not email or not password:
+                    raise ValueError("Email and password must be provided when not logged in")
+                
+                # Attempt login
+                login_success = await self.login_page.login(email, password)
+                if not login_success:
+                    raise Exception("Failed to log in to LinkedIn")
+            
+            # Now proceed with scraping
+            profile_ids = arguments.get("profile_ids")
+            max_posts = arguments.get("max_posts", 5)
+            
+            posts = await self.profile_page.scrape_linkedin_posts(profile_ids, max_posts)
+            
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "success": True,
+                        "posts": posts
+                    })
+                }]
+            }
+        except Exception as e:
+            logger.error(f"Failed to scrape posts: {str(e)}")
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "success": False,
+                        "error": str(e)
                     })
                 }],
                 "isError": True
