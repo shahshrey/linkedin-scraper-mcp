@@ -149,7 +149,7 @@ class LinkedInLoginServer:
     async def _handle_scrape_posts(self, arguments: Dict) -> Dict:
         """Handle LinkedIn post scraping requests with integrated login."""
         try:
-            # Only initialize browser if not already initialized
+            # Initialize browser if needed
             if not self.page or not self.context or not self.browser:
                 await self._ensure_browser()
             
@@ -172,12 +172,8 @@ class LinkedInLoginServer:
             
             posts = await self.profile_page.scrape_linkedin_posts(profile_ids, max_posts)
 
-            # Close the browser after successful scraping and store posts
-            logger.info("Scraping complete. Closing the browser.")
-            await self._cleanup()
-
-            # Return results after cleanup
-            return {
+            # Return results before cleanup
+            result = {
                 "content": [{
                     "type": "text",
                     "text": json.dumps({
@@ -186,6 +182,11 @@ class LinkedInLoginServer:
                     })
                 }]
             }
+
+            # Only cleanup if we're done with all operations
+            await self._cleanup()
+            return result
+
         except Exception as e:
             logger.error(f"Failed to scrape posts: {str(e)}")
             await self._cleanup()  # Ensure cleanup on error
