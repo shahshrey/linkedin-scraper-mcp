@@ -11,7 +11,7 @@ from profile_page import ProfilePage
 
 # Constants
 PROTOCOL_VERSION = "0.1.0"
-SERVER_NAME = "linkedin-login-server"
+SERVER_NAME = "linkedin-scraper"
 
 # Configure logging
 logging.basicConfig(
@@ -66,34 +66,8 @@ class LinkedInLoginServer:
         return {
             "tools": [
                 {
-                    "name": "login",
-                    "description": "Log in to LinkedIn using provided credentials",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "email": {
-                                "type": "string",
-                                "description": "LinkedIn email/username"
-                            },
-                            "password": {
-                                "type": "string",
-                                "description": "LinkedIn password"
-                            }
-                        },
-                        "required": ["email", "password"]
-                    }
-                },
-                {
-                    "name": "check_login_status",
-                    "description": "Check if currently logged in to LinkedIn",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {}
-                    }
-                },
-                {
                     "name": "scrape_posts",
-                    "description": "Scrape LinkedIn posts from specified profiles (includes login if needed)",
+                    "description": "Scrape LinkedIn posts from specified profiles (handles login automatically)",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -109,14 +83,14 @@ class LinkedInLoginServer:
                             },
                             "email": {
                                 "type": "string",
-                                "description": "LinkedIn email/username (required if not already logged in)"
+                                "description": "LinkedIn email/username"
                             },
                             "password": {
                                 "type": "string",
-                                "description": "LinkedIn password (required if not already logged in)"
+                                "description": "LinkedIn password"
                             }
                         },
-                        "required": ["profile_ids"]
+                        "required": ["profile_ids", "email", "password"]
                     }
                 }
             ]
@@ -164,11 +138,7 @@ class LinkedInLoginServer:
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
 
-        if tool_name == "login":
-            return await self._handle_login(arguments)
-        elif tool_name == "check_login_status":
-            return await self._handle_check_login_status()
-        elif tool_name == "scrape_posts":
+        if tool_name == "scrape_posts":
             return await self._handle_scrape_posts(arguments)
         else:
             raise McpError(
@@ -176,88 +146,37 @@ class LinkedInLoginServer:
                 f"Unknown tool: {tool_name}"
             )
 
-    async def _handle_login(self, arguments: Dict) -> Dict:
-        """Handle LinkedIn login requests."""
+    async def _handle_scrape_posts(self, arguments: Dict) -> Dict:
+        """Handle LinkedIn post scraping requests with integrated login."""
         try:
-            await self._ensure_browser()
+            # Only initialize browser if not already initialized
+            if not self.page or not self.context or not self.browser:
+                await self._ensure_browser()
+            
+            # Get credentials from arguments
             email = arguments.get("email")
             password = arguments.get("password")
             
-            success = await self.login_page.login(email, password)
+            if not email or not password:
+                raise ValueError("Email and password must be provided")
             
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": json.dumps({
-                        "success": success,
-                        "message": "Successfully logged in to LinkedIn"
-                    })
-                }]
-            }
-        except Exception as e:
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": json.dumps({
-                        "success": False,
-                        "error": str(e)
-                    })
-                }],
-                "isError": True
-            }
-
-    async def _handle_check_login_status(self) -> Dict:
-        """Handle login status check requests."""
-        try:
-            await self._ensure_browser()
-            is_logged_in = await self.login_page.is_logged_in()
-            
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": json.dumps({
-                        "logged_in": is_logged_in
-                    })
-                }]
-            }
-        except Exception as e:
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": json.dumps({
-                        "error": f"Failed to check login status: {str(e)}"
-                    })
-                }],
-                "isError": True
-            }
-
-    async def _handle_scrape_posts(self, arguments: Dict) -> Dict:
-        """Handle LinkedIn post scraping requests."""
-        try:
-            await self._ensure_browser()
-            
-            # First check if we're already logged in
-            is_logged_in = await self.login_page.is_logged_in()
-            
-            if not is_logged_in:
-                # Get credentials from arguments
-                email = arguments.get("email")
-                password = arguments.get("password")
-                
-                if not email or not password:
-                    raise ValueError("Email and password must be provided when not logged in")
-                
-                # Attempt login
+            # Only login if not already logged in
+            if not await self.login_page.is_logged_in():
                 login_success = await self.login_page.login(email, password)
                 if not login_success:
                     raise Exception("Failed to log in to LinkedIn")
             
-            # Now proceed with scraping
+            # Proceed with scraping
             profile_ids = arguments.get("profile_ids")
             max_posts = arguments.get("max_posts", 5)
             
             posts = await self.profile_page.scrape_linkedin_posts(profile_ids, max_posts)
-            
+
+            # Close the browser after successful scraping and store posts
+            logger.info("Scraping complete. Closing the browser.")
+            await self._cleanup()
+
+            # Return results after cleanup
             return {
                 "content": [{
                     "type": "text",
@@ -269,6 +188,7 @@ class LinkedInLoginServer:
             }
         except Exception as e:
             logger.error(f"Failed to scrape posts: {str(e)}")
+            await self._cleanup()  # Ensure cleanup on error
             return {
                 "content": [{
                     "type": "text",
@@ -282,12 +202,21 @@ class LinkedInLoginServer:
 
     async def _cleanup(self):
         """Clean up browser context, browser, and Playwright instance."""
-        if self.context:
-            await self.context.close()
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
+        try:
+            if self.context:
+                await self.context.close()
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+        finally:
+            # Reset all browser-related instances after cleanup
+            self.playwright = None
+            self.browser = None
+            self.context = None
+            self.page = None
+            self.login_page = None
+            self.profile_page = None
 
     async def _handle_message(self, message: str) -> None:
         """Handle a single JSON-RPC message."""
@@ -343,13 +272,22 @@ class LinkedInLoginServer:
             print(json.dumps(error_response), flush=True)
 
     async def run(self) -> None:
+        """Modified run method with proper exit handling"""
         sys.stdout.reconfigure(line_buffering=True)
         sys.stderr.reconfigure(line_buffering=True)
 
         logger.info(f"Starting {SERVER_NAME}")
         
-        for line in sys.stdin:
-            await self._handle_message(line.strip())
+        try:
+            while True:
+                line = sys.stdin.readline()
+                if not line:
+                    logger.info("Received EOF, shutting down server")
+                    break
+                
+                await self._handle_message(line.strip())
+        finally:
+            await self._cleanup()  # Only cleanup when server stops completely
 
     def _handle_list_resources(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """

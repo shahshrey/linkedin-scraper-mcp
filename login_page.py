@@ -17,13 +17,16 @@ class LoginPage:
         self.login_button = page.locator('button[type="submit"]')
 
     async def login(self, email: Optional[str] = None, password: Optional[str] = None) -> bool:
-        """
-        Handle LinkedIn login with proper error handling and logging.
-        """
+        """Handle LinkedIn login with proper error handling and logging."""
         if not email or not password:
             raise ValueError("Email and password must be provided")
 
         try:
+            # First check if already logged in
+            if await self.is_logged_in():
+                logger.info("Already logged in, skipping login process")
+                return True
+
             logger.info("Attempting LinkedIn login")
             await self.page.goto("https://www.linkedin.com/login", timeout=60000)
             
@@ -31,9 +34,16 @@ class LoginPage:
             await self.password_input.fill(password)
             await self.login_button.click()
 
-            # Wait for initial navigation after clicking login
-            await self.page.wait_for_load_state("domcontentloaded", timeout=30000)
-            
+            # Wait for navigation and check for success
+            try:
+                # Wait for either feed page or security checkpoint
+                await self.page.wait_for_url(
+                    lambda url: any(x in url for x in ["feed", "checkpoint", "security-verification"]),
+                    timeout=30000
+                )
+            except TimeoutError:
+                raise Exception("Login failed: Timeout waiting for redirect")
+
             current_url = self.page.url
 
             # Check URL for success/failure
@@ -44,16 +54,11 @@ class LoginPage:
                 logger.warning("Security verification required")
                 return False
             else:
-                html = await self.page.content()
-                logger.error(f"Unexpected page content: {html[:500]}...")
                 raise Exception(f"Unexpected redirect URL: {current_url}")
             
-        except TimeoutError:
-            logger.error("Login timeout - failed to redirect to feed page")
-            raise Exception("Login failed: Timeout waiting for redirect")
         except Exception as e:
             logger.error(f"Login failed with error: {str(e)}")
-            raise Exception(f"Login failed: {str(e)}")
+            raise
 
     async def is_logged_in(self) -> bool:
         """Check if user is currently logged in to LinkedIn."""
