@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import asyncio
 import json
+import os
 import sys
 import logging
 from typing import Dict, Any
@@ -8,10 +9,8 @@ from playwright.async_api import async_playwright
 from login_page import LoginPage
 from mcp.types import ErrorData as McpError, METHOD_NOT_FOUND
 from profile_page import ProfilePage
-
-# Constants
-PROTOCOL_VERSION = "0.1.0"
-SERVER_NAME = "linkedin-scraper"
+from dotenv import load_dotenv
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -20,6 +19,20 @@ logging.basicConfig(
     stream=sys.stderr
 )
 logger = logging.getLogger(__name__)
+
+LINKEDIN_EMAIL = os.getenv("LINKEDIN_EMAIL")
+LINKEDIN_PASSWORD = os.getenv("LINKEDIN_PASSWORD")
+PROTOCOL_VERSION = "0.1.0"
+SERVER_NAME = "linkedin-scraper"
+
+
+try:
+    if not LINKEDIN_EMAIL or not LINKEDIN_PASSWORD:
+        raise ValueError("Required environment variables LINKEDIN_EMAIL and LINKEDIN_PASSWORD are not set")
+except Exception as e:
+    logger.error(f"Environment configuration error: {str(e)}")
+    sys.exit(1)
+
 
 class LinkedInLoginServer:
     def __init__(self) -> None:
@@ -81,16 +94,8 @@ class LinkedInLoginServer:
                                 "description": "Maximum number of posts to scrape per profile",
                                 "default": 5
                             },
-                            "email": {
-                                "type": "string",
-                                "description": "LinkedIn email/username"
-                            },
-                            "password": {
-                                "type": "string",
-                                "description": "LinkedIn password"
-                            }
                         },
-                        "required": ["profile_ids", "email", "password"]
+                        "required": ["profile_ids"]
                     }
                 }
             ]
@@ -108,7 +113,7 @@ class LinkedInLoginServer:
             
             logger.info("Launching browser")
             self.browser = await self.playwright.chromium.launch(
-                headless=False,
+                headless=True,
                 slow_mo=100
             )
             
@@ -153,16 +158,11 @@ class LinkedInLoginServer:
             if not self.page or not self.context or not self.browser:
                 await self._ensure_browser()
             
-            # Get credentials from arguments
-            email = arguments.get("email")
-            password = arguments.get("password")
-            
-            if not email or not password:
-                raise ValueError("Email and password must be provided")
+
             
             # Only login if not already logged in
             if not await self.login_page.is_logged_in():
-                login_success = await self.login_page.login(email, password)
+                login_success = await self.login_page.login(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
                 if not login_success:
                     raise Exception("Failed to log in to LinkedIn")
             
@@ -333,7 +333,7 @@ class LinkedInLoginServer:
         try:
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch(
-                headless=False,  # Set to True in production
+                headless=True,  # Set to True in production
                 slow_mo=50  # Slows down operations to make them visible
             )
             self.context = await self.browser.new_context()

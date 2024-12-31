@@ -5,3 +5,4 @@ pytest-playwright
 mcp
 beautifulsoup4 
 lxml
+python-dotenv

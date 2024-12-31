@@ -84,7 +84,7 @@ INFO:__main__:Browser session initialized
 
 If you don't see the browser:
 1. Ensure you have Playwright installed and configured
-2. Check that the server is running with `headless=False`
+2. Check that the server is running with `headless=True`
 3. Look for any error messages in the console output
 
 ## Development Notes
