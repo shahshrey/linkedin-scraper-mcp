@@ -4,12 +4,13 @@ import json
 import os
 import sys
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List
 from playwright.async_api import async_playwright
 from login_page import LoginPage
 from mcp.types import ErrorData as McpError, METHOD_NOT_FOUND
 from profile_page import ProfilePage
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 load_dotenv()
 
 # Configure logging
@@ -32,6 +33,29 @@ try:
 except Exception as e:
     logger.error(f"Environment configuration error: {str(e)}")
     sys.exit(1)
+
+
+class ScrapePostsInput(BaseModel):
+    profile_ids: List[str] = Field(
+        description="List of LinkedIn profile IDs to scrape"
+    )
+    max_posts: int = Field(
+        default=5,
+        description="Maximum number of posts to scrape per profile"
+    )
+
+class Tool(BaseModel):
+    name: str = Field(description="Name of the tool")
+    description: str = Field(description="Description of what the tool does")
+    inputSchema: dict = Field(description="JSON schema for the tool's input")
+
+class ScraperTool(Tool):
+    name: str = Field(default="scrape_posts")
+    description: str = Field(default="Scrape LinkedIn posts from specified profiles (handles login automatically)")
+    inputSchema: dict = Field(default_factory=lambda: ScrapePostsInput.model_json_schema())
+
+class ToolsList(BaseModel):
+    tools: List[Tool]
 
 
 class LinkedInLoginServer:
@@ -76,30 +100,12 @@ class LinkedInLoginServer:
 
     async def _handle_list_tools(self, _: Any) -> Dict:
         """Handle listing available tools."""
-        return {
-            "tools": [
-                {
-                    "name": "scrape_posts",
-                    "description": "Scrape LinkedIn posts from specified profiles (handles login automatically)",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "profile_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "List of LinkedIn profile IDs to scrape"
-                            },
-                            "max_posts": {
-                                "type": "integer",
-                                "description": "Maximum number of posts to scrape per profile",
-                                "default": 5
-                            },
-                        },
-                        "required": ["profile_ids"]
-                    }
-                }
+        tools_list = ToolsList(
+            tools=[
+                ScraperTool()
             ]
-        }
+        )
+        return tools_list.model_dump()
 
     async def _ensure_browser(self):
         """Ensure browser is initialized."""
@@ -154,6 +160,13 @@ class LinkedInLoginServer:
     async def _handle_scrape_posts(self, arguments: Dict) -> Dict:
         """Handle LinkedIn post scraping requests with integrated login."""
         try:
+            # Validate input
+            input_data = ScrapePostsInput(**arguments)
+            
+            # Use validated data
+            profile_ids = input_data.profile_ids
+            max_posts = input_data.max_posts
+            
             # Initialize browser if needed
             if not self.page or not self.context or not self.browser:
                 await self._ensure_browser()
@@ -167,9 +180,6 @@ class LinkedInLoginServer:
                     raise Exception("Failed to log in to LinkedIn")
             
             # Proceed with scraping
-            profile_ids = arguments.get("profile_ids")
-            max_posts = arguments.get("max_posts", 5)
-            
             posts = await self.profile_page.scrape_linkedin_posts(profile_ids, max_posts)
 
             # Return results before cleanup
