@@ -57,6 +57,25 @@ class ScraperTool(Tool):
 class ToolsList(BaseModel):
     tools: List[Tool]
 
+# Add new input model for connection requests
+class SendConnectionInput(BaseModel):
+    search_query: str = Field(
+        description="Search query to find LinkedIn profiles (e.g., 'Software Engineer at Google')"
+    )
+    max_connections: int = Field(
+        default=10,
+        description="Maximum number of connection requests to send"
+    )
+    custom_note: str = Field(
+        default="",
+        description="Optional custom note to include with connection requests"
+    )
+
+# Add new connection tool
+class ConnectionTool(Tool):
+    name: str = Field(default="send_connections")
+    description: str = Field(default="Search for LinkedIn profiles and send connection requests")
+    inputSchema: dict = Field(default_factory=lambda: SendConnectionInput.model_json_schema())
 
 class LinkedInLoginServer:
     def __init__(self) -> None:
@@ -76,6 +95,7 @@ class LinkedInLoginServer:
         self.page = None
         self.login_page = None
         self.profile_page = None
+        self.search_page = None
 
     def _handle_initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
         client_protocol_version = params.get('protocolVersion', PROTOCOL_VERSION)
@@ -102,7 +122,8 @@ class LinkedInLoginServer:
         """Handle listing available tools."""
         tools_list = ToolsList(
             tools=[
-                ScraperTool()
+                ScraperTool(),
+                ConnectionTool()  # Add the new tool
             ]
         )
         return tools_list.model_dump()
@@ -119,7 +140,7 @@ class LinkedInLoginServer:
             
             logger.info("Launching browser")
             self.browser = await self.playwright.chromium.launch(
-                headless=True,
+                headless=False,
                 slow_mo=100
             )
             
@@ -151,6 +172,8 @@ class LinkedInLoginServer:
 
         if tool_name == "scrape_posts":
             return await self._handle_scrape_posts(arguments)
+        elif tool_name == "send_connections":
+            return await self._handle_send_connections(arguments)
         else:
             raise McpError(
                 METHOD_NOT_FOUND,
@@ -210,6 +233,153 @@ class LinkedInLoginServer:
                 }],
                 "isError": True
             }
+
+    async def _handle_send_connections(self, arguments: Dict) -> Dict:
+        """Handle LinkedIn connection request sending."""
+        try:
+            # Validate input
+            input_data = SendConnectionInput(**arguments)
+            logger.debug(f"Validated input data: {input_data}")
+
+            # Initialize browser if needed
+            if not self.page or not self.context or not self.browser:
+                logger.info("Browser not initialized, initializing now.")
+                await self._ensure_browser()
+            
+            # Login if necessary
+            if not await self.login_page.is_logged_in():
+                logger.info("Not logged in, attempting login.")
+                login_success = await self.login_page.login(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
+                if not login_success:
+                    raise Exception("Failed to log in to LinkedIn")
+                logger.info("Login successful.")
+
+            # Search for profiles
+            search_url = f"https://www.linkedin.com/search/results/people/?keywords={input_data.search_query}"
+            logger.debug(f"Navigating to search URL: {search_url}")
+            await self.page.goto(search_url)
+            await self.page.wait_for_timeout(2000)
+            logger.info("Search page loaded.")
+
+            sent_requests = 0
+            results = []
+            
+            for _ in range(min(input_data.max_connections, 3)):
+                connect_buttons = await self.page.query_selector_all("button:has-text('Connect')")
+                logger.debug(f"Found {len(connect_buttons)} connect buttons on the page.")
+
+                for button in connect_buttons:
+                    if sent_requests >= input_data.max_connections:
+                        logger.info("Reached maximum connection requests limit.")
+                        break
+                        
+                    try:
+                        # Updated selector to find the profile name using the correct class structure
+                        profile_card = await button.evaluate("""
+                            button => {
+                                const container = button.closest('.entity-result__item');
+                                if (!container) return null;
+                                const nameElement = container.querySelector('.entity-result__title-text a');
+                                const titleElement = container.querySelector('.entity-result__primary-subtitle');
+                                return {
+                                    name: nameElement ? nameElement.innerText.trim() : 'Unknown Profile',
+                                    title: titleElement ? titleElement.innerText.trim() : ''
+                                };
+                            }
+                        """)
+                        
+                        if not profile_card or not profile_card.get('name'):
+                            logger.warning("Profile information not found, trying alternative selector...")
+                            # Alternative selector for the new LinkedIn UI
+                            profile_card = await button.evaluate("""
+                                button => {
+                                    const container = button.closest('.iLNPXRzIPSRzJxVVZISWYouxrvwqQ');
+                                    if (!container) return null;
+                                    const nameElement = container.querySelector('.vjvKoXFFJtfnpBNnkgFTzWnDmsSASvTcGEESnk a');
+                                    const titleElement = container.querySelector('.hnypMlQNtRKZTJxKVVHfxzWpjYbYocHvxY');
+                                    return {
+                                        name: nameElement ? nameElement.innerText.trim() : 'Unknown Profile',
+                                        title: titleElement ? titleElement.innerText.trim() : ''
+                                    };
+                                }
+                            """)
+
+                        if not profile_card or not profile_card.get('name'):
+                            logger.warning("Profile card not found, skipping this button.")
+                            continue
+
+                        logger.info(f"Attempting to connect with profile: {profile_card['name']} ({profile_card['title']})")
+
+                        # Rest of the connection logic remains the same
+                        await button.click()
+                        await self.page.wait_for_timeout(1000)
+                        
+                        if input_data.custom_note:
+                            logger.debug("Adding custom note to connection request.")
+                            add_note_button = await self.page.wait_for_selector("button:has-text('Add a note')", timeout=2000)
+                            if add_note_button:
+                                await add_note_button.click()
+                                await self.page.wait_for_timeout(500)
+                                await self.page.fill("textarea[name='message']", input_data.custom_note)
+                                send_button = await self.page.wait_for_selector("button:has-text('Send')", timeout=2000)
+                                if send_button:
+                                    await send_button.click()
+                        else:
+                            send_button = await self.page.wait_for_selector("button:has-text('Send')", timeout=2000)
+                            if send_button:
+                                await send_button.click()
+                        
+                        results.append({
+                            "name": profile_card['name'],
+                            "title": profile_card['title'],
+                            "status": "success"
+                        })
+                        sent_requests += 1
+                        logger.info(f"Connection request sent to {profile_card['name']} ({profile_card['title']}). Total sent: {sent_requests}")
+                        await self.page.wait_for_timeout(1000)
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to send connection request to {profile_card['name']} ({profile_card['title']}): {str(e)}", exc_info=True)
+                        continue
+                
+                if sent_requests >= input_data.max_connections:
+                    break
+                    
+                next_button = await self.page.query_selector("button[aria-label='Next']")
+                if next_button:
+                    logger.info("Navigating to the next page of search results.")
+                    await next_button.click()
+                    await self.page.wait_for_timeout(1000)
+                else:
+                    logger.info("No more pages to navigate.")
+                    break
+
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "success": True,
+                        "connections_sent": sent_requests,
+                        "results": results
+                    })
+                }]
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to send connection requests: {str(e)}", exc_info=True)
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "success": False,
+                        "error": str(e)
+                    })
+                }],
+                "isError": True
+            }
+        finally:
+            logger.info("Cleaning up browser session.")
+            await self._cleanup()
 
     async def _cleanup(self):
         """Clean up browser context, browser, and Playwright instance."""
@@ -343,7 +513,7 @@ class LinkedInLoginServer:
         try:
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch(
-                headless=True,  # Set to True in production
+                headless=False,  # Set to True in production
                 slow_mo=50  # Slows down operations to make them visible
             )
             self.context = await self.browser.new_context()
@@ -354,6 +524,43 @@ class LinkedInLoginServer:
             print(f"Failed to initialize browser: {str(e)}")
             await self._cleanup()
             raise
+
+    async def _process_profiles(self):
+        """Process profiles from the search page."""
+        try:
+            # Try to find profile cards on the page
+            profile_cards = await self.page.query_selector_all(".iLNPXRzIPSRzJxVVZISWYouxrvwqQ")
+            
+            if not profile_cards:
+                logger.error("No profile cards found on page")
+                return
+            
+            for profile_card in profile_cards:
+                try:
+                    # Click the connect button within the profile card
+                    connect_button = await profile_card.query_selector('button[aria-label^="Connect"]')
+                    if connect_button:
+                        await connect_button.click()
+                        logger.info("Clicked connect button")
+
+                        # Wait for the modal to appear
+                        await self.page.wait_for_selector('.artdeco-modal', timeout=5000)
+                        logger.info("Modal appeared")
+
+                        # Click the "Send without a note" button
+                        send_button = await self.page.query_selector('button[aria-label="Send without a note"]')
+                        if send_button:
+                            await send_button.click()
+                            logger.info("Sent connection request without a note")
+                        else:
+                            logger.error("Send button not found")
+                    else:
+                        logger.info("Connect button not found for this profile")
+                except Exception as e:
+                    logger.error(f"Error processing profile card: {str(e)}", exc_info=True)
+
+        except Exception as e:
+            logger.error(f"Error processing profiles: {str(e)}", exc_info=True)
 
 if __name__ == "__main__":
     server = LinkedInLoginServer()
